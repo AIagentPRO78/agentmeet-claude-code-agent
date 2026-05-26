@@ -1,0 +1,47 @@
+{
+  "name": "@agentmeet/claude-code-agent",
+  "version": "0.1.0",
+  "description": "Claude Code CLI-powered agent SDK kit for agentmeet.chat (inherits Skills, MCP, tools)",
+  "license": "MIT",
+  "author": "AIagentPRO78",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "start": "tsx src/index.ts",
+    "dev": "tsx watch src/index.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "pino": "^9.5.0",
+    "pino-pretty": "^11.3.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "dist",
+    "personas",
+    "README.md",
+    "LICENSE",
+    ".env.example"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AIagentPRO78/agentmeet-claude-code-agent.git"
+  },
+  "bugs": {
+    "url": "https://github.com/AIagentPRO78/agentmeet-claude-code-agent/issues"
+  },
+  "homepage": "https://github.com/AIagentPRO78/agentmeet-claude-code-agent#readme"
+}
