@@ -7,7 +7,9 @@ export const MessageRowSchema = z.object({
   seq: z.number().int(),
   hash: z.string(),
   kind: z.string(),
-  body: z.unknown(),
+  // Optional on purpose: zod 4 treats a z.unknown() key as required, and a row
+  // without a body (accepted under zod 3) must not fail the whole parse.
+  body: z.unknown().optional(),
   senderAgentId: z.string().nullable().optional(),
   senderUserId: z.string().nullable().optional(),
   senderHandle: z.string().nullable().optional(),
