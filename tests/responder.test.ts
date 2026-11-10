@@ -10,6 +10,9 @@ import {
   ClaudeCodeResponder,
   ClaudeCodeTimeoutError,
   ClaudeCodeExitError,
+  GUARDED_TOOLS,
+  childEnv,
+  deniedTools,
   type TranscriptTurn,
 } from '../src/claude_code/responder.js';
 import type { MessageRow } from '../src/agentmeet/types.js';
@@ -264,15 +267,56 @@ describe('ClaudeCodeResponder.respond (mocked spawn)', () => {
     expect(args[idx + 1]).toBe('Bash,Read');
   });
 
-  it('defaults to the read-only tool allowlist when allowedTools is unset', () => {
+  it('pre-approves no tools and denies every guarded tool when allowedTools is unset', () => {
     const responder = new ClaudeCodeResponder({
       persona: 'PERSONA',
       claudeBin: '/fake/claude',
     });
     const args = responder.buildArgs();
-    const idx = args.indexOf('--allowed-tools');
+    expect(args).not.toContain('--allowed-tools');
+    const idx = args.indexOf('--disallowed-tools');
     expect(idx).toBeGreaterThanOrEqual(0);
-    expect(args[idx + 1]).toBe('Bash,Read,Grep,Glob,WebFetch');
+    expect(args[idx + 1]).toBe(GUARDED_TOOLS.join(','));
+    expect(args[idx + 1]).toContain('Bash');
+  });
+
+  it('denies only the guarded tools the operator did not allow', () => {
+    const responder = new ClaudeCodeResponder({
+      persona: 'PERSONA',
+      claudeBin: '/fake/claude',
+      allowedTools: ['Read', 'Bash(git log:*)', 'mcp__context7_*'],
+    });
+    const args = responder.buildArgs();
+    const denied = (args[args.indexOf('--disallowed-tools') + 1] ?? '').split(',');
+    expect(denied).not.toContain('Read');
+    expect(denied).not.toContain('Bash');
+    expect(denied).toContain('Write');
+    expect(denied).toContain('WebFetch');
+    expect(args[args.indexOf('--allowed-tools') + 1]).toBe(
+      'Read,Bash(git log:*),mcp__context7_*',
+    );
+  });
+
+  it('adds no deny list when the operator opts in to all tools', () => {
+    expect(deniedTools(['*'])).toEqual([]);
+    const responder = new ClaudeCodeResponder({
+      persona: 'PERSONA',
+      claudeBin: '/fake/claude',
+      allowedTools: ['*'],
+    });
+    expect(responder.buildArgs()).not.toContain('--disallowed-tools');
+  });
+
+  it('keeps AgentMeet credentials out of the CLI environment', () => {
+    const env = childEnv({
+      PATH: '/usr/bin',
+      ANTHROPIC_API_KEY: 'kept',
+      AGENTMEET_BEARER_TOKEN: 'dropped',
+      AGENTMEET_PROVISIONING_TOKEN: 'dropped',
+    });
+    expect(env.PATH).toBe('/usr/bin');
+    expect(env.ANTHROPIC_API_KEY).toBe('kept');
+    expect(Object.keys(env).some((k) => k.startsWith('AGENTMEET_'))).toBe(false);
   });
 
   it('omits --model when model is not set', () => {

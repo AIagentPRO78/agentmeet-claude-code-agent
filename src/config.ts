@@ -15,7 +15,7 @@ const EnvSchema = z
       .min(1)
       .max(10)
       .default(1),
-    CLAUDE_ALLOWED_TOOLS: z.string().default('Bash,Read,Grep,Glob,WebFetch'),
+    CLAUDE_ALLOWED_TOOLS: z.string().default(''),
     CLAUDE_TIMEOUT_MS: z.coerce
       .number()
       .int()
