@@ -1,5 +1,14 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { readChatText, type MessageRow } from '../agentmeet/types.js';
+import {
+  clampText,
+  fitTranscript,
+  flattenMessageText,
+  MAX_MESSAGE_CHARS,
+  renderSpeakerLine,
+  speakerLabel,
+  TRANSCRIPT_NOTE,
+} from '../transcript.js';
 
 export interface TranscriptTurn {
   readonly role: 'user' | 'assistant';
@@ -15,10 +24,18 @@ export interface BuildPromptInput {
 
 const DEFAULT_WINDOW = 20;
 
+// Label on the agent's own lines in the rendered prompt (see renderPrompt).
+const SELF_LABEL = 'me';
+
 /**
  * Convert a slice of AgentMeet message rows into transcript turns.
  * The agent's own past messages become `assistant`, everyone else's become `user`.
  * Non-chat kinds and rows with no text are dropped.
+ *
+ * Other participants' text is untrusted: each message is rendered on one line
+ * behind a label the kit adds, and message / transcript length is bounded
+ * (see ../transcript.ts). The agent's own messages are put on one line too,
+ * because renderPrompt writes them into the same block of text as "me:" lines.
  */
 export function buildTranscript(input: BuildPromptInput): TranscriptTurn[] {
   const window = input.windowSize ?? DEFAULT_WINDOW;
@@ -29,16 +46,18 @@ export function buildTranscript(input: BuildPromptInput): TranscriptTurn[] {
     const chat = readChatText(row.body);
     if (!chat) continue;
     const isSelf = input.selfAgentId !== null && row.senderAgentId === input.selfAgentId;
-    const author = isSelf
-      ? 'me'
-      : (row.senderAgentId ?? row.senderUserId ?? 'unknown').slice(0, 8);
+    const label = speakerLabel(row.senderAgentId ?? row.senderUserId ?? 'unknown');
+    // Nobody else may carry the agent's own label.
+    const author = isSelf ? SELF_LABEL : label === SELF_LABEL ? `${SELF_LABEL}_` : label;
     turns.push({
       role: isSelf ? 'assistant' : 'user',
-      content: isSelf ? chat.text : `${author}: ${chat.text}`,
+      content: isSelf
+        ? clampText(flattenMessageText(chat.text), MAX_MESSAGE_CHARS)
+        : renderSpeakerLine(author, chat.text),
       author,
     });
   }
-  return turns;
+  return fitTranscript(turns);
 }
 
 /**
@@ -88,7 +107,11 @@ export function renderPrompt(turns: readonly TranscriptTurn[]): string {
   const lines: string[] = [];
   for (const turn of turns) {
     if (turn.role === 'assistant') {
-      lines.push(`me: ${turn.content}`);
+      // collapseTurns joins consecutive messages with "\n". Label every line,
+      // so none of the agent's own text sits on a line without a label.
+      for (const line of turn.content.split('\n')) {
+        lines.push(`${SELF_LABEL}: ${line}`);
+      }
     } else {
       // turn.content for non-self turns already contains the "author: text"
       // prefix (see buildTranscript).
@@ -205,7 +228,7 @@ export class ClaudeCodeResponder {
     const args: string[] = [
       '-p',
       '--append-system-prompt',
-      this.persona,
+      `${this.persona}\n\n${TRANSCRIPT_NOTE}`,
       '--max-turns',
       String(this.maxTurns),
       '--output-format',

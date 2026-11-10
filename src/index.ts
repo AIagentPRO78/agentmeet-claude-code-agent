@@ -7,6 +7,7 @@ import { streamMessages } from './agentmeet/sse.js';
 import { readChatText, type MessageRow } from './agentmeet/types.js';
 import { buildTranscript, ClaudeCodeResponder } from './claude_code/responder.js';
 import { isSelf } from './self-filter.js';
+import { ReplyLimiter } from './reply-limiter.js';
 
 async function checkClaudeCli(bin: string): Promise<void> {
   await new Promise<void>((resolveOnce) => {
@@ -97,9 +98,11 @@ async function ensureIdentity(cfg: AppConfig, client?: AgentMeetClient): Promise
     handle: cfg.env.AGENT_NICK,
     name: cfg.env.AGENT_NAME,
   });
+  // The returned apiToken (and key pair, if any) is deliberately not logged or
+  // written to disk; it lives in memory for this run only.
   log.info(
     { agentId: reg.id, handle: reg.handle },
-    'registered — store apiToken in AGENTMEET_BEARER_TOKEN to skip this step next run',
+    'registered — apiToken kept in memory for this run only (not printed or saved)',
   );
   return { agentId: reg.id, handle: reg.handle, token: reg.apiToken };
 }
@@ -124,6 +127,7 @@ class TurnRunner {
     private readonly roomId: string,
     private readonly selfAgentId: string | null,
     private readonly nick: string,
+    private readonly limiter: ReplyLimiter,
   ) {}
 
   public setHead(seq: number): void {
@@ -133,6 +137,21 @@ class TurnRunner {
   public async handleMention(triggeringRow: MessageRow): Promise<void> {
     if (this.busy) {
       log.debug({ seq: triggeringRow.seq }, 'single-flight: dropping mention while busy');
+      return;
+    }
+    const decision = this.limiter.tryAcquire(triggeringRow);
+    if (!decision.allowed) {
+      // Stay silent on purpose: an explanation posted to the room could itself
+      // trigger another agent and keep a reply loop going.
+      log.warn(
+        {
+          seq: triggeringRow.seq,
+          reason: decision.reason,
+          senderAgentId: triggeringRow.senderAgentId ?? undefined,
+          senderUserId: triggeringRow.senderUserId ?? undefined,
+        },
+        'reply limit: not answering this mention',
+      );
       return;
     }
     this.busy = true;
@@ -313,12 +332,28 @@ async function main(): Promise<void> {
     timeoutMs: cfg.env.CLAUDE_TIMEOUT_MS,
   });
 
+  log.info(
+    {
+      maxPerWindow: cfg.env.REPLY_MAX_PER_WINDOW,
+      windowSeconds: cfg.env.REPLY_WINDOW_SECONDS,
+      maxAgentStreak: cfg.env.REPLY_MAX_AGENT_STREAK,
+      allowedSenders: cfg.env.REPLY_ALLOWED_SENDERS.length || 'anyone',
+    },
+    'reply limits',
+  );
+
   const runner = new TurnRunner(
     client,
     responder,
     cfg.env.AGENTMEET_ROOM_ID,
     identity.agentId.length > 0 ? identity.agentId : null,
     cfg.env.AGENT_NICK,
+    new ReplyLimiter({
+      maxReplies: cfg.env.REPLY_MAX_PER_WINDOW,
+      windowMs: cfg.env.REPLY_WINDOW_SECONDS * 1000,
+      maxAgentStreak: cfg.env.REPLY_MAX_AGENT_STREAK,
+      allowedSenders: cfg.env.REPLY_ALLOWED_SENDERS,
+    }),
   );
 
   await runLoop(
