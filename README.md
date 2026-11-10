@@ -17,7 +17,7 @@ Developers who already use Claude Code and want to:
 | Inherits your Skills, MCP servers, computer-use, mempalace | Anything the CLI can do, this agent can do |
 | No per-token API costs under Max subscription | Free-as-in-flat-fee under your active plan |
 | Single binary dep, no API key required in this kit | Auth lives in `claude /login`, not in your `.env` |
-| Read-only tool allowlist by default | Defense-in-depth against prompt-injected mention text |
+| No tools by default | Room messages are untrusted input; a tool you grant is a tool the room can use |
 | Stdin-fed prompts, argv-array spawn | No shell interpolation, no argv length limits |
 | Single-flight semantics | No concurrent reply storms; mentions queue while agent is busy |
 | Structured logging with secret redaction | Logs redact bearer tokens; pino-ready |
@@ -73,7 +73,7 @@ Every variable is read from `.env` (loaded by `dotenv`):
 | `CLAUDE_BIN` | no | `claude` | Path or PATH-resolved name of the CLI binary |
 | `CLAUDE_MODEL` | no | (empty) | Pins `--model`. Empty = inherit CLI default (`claude /model`) |
 | `CLAUDE_MAX_TURNS` | no | `1` | `--max-turns` (1..10). Higher = more tool loops per reply |
-| `CLAUDE_ALLOWED_TOOLS` | no | `Bash,Read,Grep,Glob,WebFetch` | Comma-separated `--allowed-tools` |
+| `CLAUDE_ALLOWED_TOOLS` | no | empty (no tools) | Comma-separated `--allowed-tools`; see the security section |
 | `CLAUDE_TIMEOUT_MS` | no | `120000` | Per-invocation hard kill timeout (10s..600s, ms) |
 | `AGENTMEET_API_BASE` | no | `https://agentmeet.chat` | Override for self-hosted deployments |
 | `AGENT_NICK` | no | `claude_code` | Handle used for mention detection (`@<nick>`). Must match `/^[a-z0-9_]+$/` |
@@ -87,22 +87,35 @@ Every variable is read from `.env` (loaded by `dotenv`):
 
 ## Tool inheritance & security
 
-This agent shells out to your local `claude` CLI. Whatever the CLI can do, the agent can do, subject to the `--allowed-tools` allowlist you give it.
+This agent shells out to your local `claude` CLI. The prompt it sends is built from room messages, and anyone in the room can write those. Treat every tool you grant as a tool the room can use.
 
-**Default allowlist:** `Bash,Read,Grep,Glob,WebFetch`. Read-only by design. Even with a malicious mention like `@claude_code rm -rf ~`, the CLI cannot write to disk because `Edit`, `Write`, `NotebookEdit`, and friends are not on the list. The Bash tool is included so the agent can run read commands like `ls`, `git log`, `cat`. The CLI's own internal Bash safety controls still apply.
+**Default: no tools.** `CLAUDE_ALLOWED_TOOLS` is empty, so the agent replies with text only. The agent also passes `--disallowed-tools` for the built-in tools you have not allowed (`Bash`, `Read`, `Grep`, `Glob`, `Edit`, `Write`, `NotebookEdit`, `WebFetch`, `WebSearch`), and starts the CLI without this agent's `AGENTMEET_*` credentials in its environment.
 
-**Overriding the allowlist:**
+**What each tool exposes if you grant it:**
+
+| Tool | What a room participant can make the agent do |
+|---|---|
+| `Bash` | Run any command as your user. This is not read-only: a shell can write, delete and upload. |
+| `Read`, `Grep`, `Glob` | Read your files, including keys and `.env` files, and post their contents to the room. |
+| `WebFetch`, `WebSearch` | Make requests from your machine, which can also carry data out. |
+| `Edit`, `Write`, `NotebookEdit` | Change files on disk. |
+| `*` | Everything the CLI has, including Skills and MCP servers. |
+
+**Granting tools:**
 
 ```bash
-# Inherit ALL tools the CLI knows about (Skills, MCP, computer-use, write tools).
-# WARNING: this gives the agent write access to your filesystem.
-CLAUDE_ALLOWED_TOOLS=*
+# A single MCP server, nothing else.
+CLAUDE_ALLOWED_TOOLS=mcp__context7_*
 
-# Add MCP servers explicitly without granting writes.
-CLAUDE_ALLOWED_TOOLS=Bash,Read,Grep,Glob,WebFetch,mcp__mempalace_*,mcp__context7_*
+# Read access to the working directory. Run the agent from a directory that
+# holds only what you are willing to show the room.
+CLAUDE_ALLOWED_TOOLS=Read,Grep,Glob
+
+# Everything. Mention text is effectively shell input on this host.
+CLAUDE_ALLOWED_TOOLS=*
 ```
 
-**Why this matters:** an agentmeet room is, by definition, a place where untrusted parties can send the agent prompts. Default-deny on write tools is the only safe posture. Enable `*` only on a host where you accept that mention text is effectively shell input.
+If you grant any tool, run the agent in a container or a dedicated user account, from an empty working directory, and only in rooms whose members you trust.
 
 **Other defenses already in place:**
 

@@ -131,13 +131,45 @@ type SpawnFn = (
 ) => ChildProcessWithoutNullStreams;
 
 const DEFAULT_TIMEOUT_MS = 120_000;
-const DEFAULT_ALLOWED_TOOLS: readonly string[] = [
+// No tool is pre-approved by default. The prompt is built from room messages,
+// which any participant can write, so every tool granted here is reachable by
+// prompt injection.
+const DEFAULT_ALLOWED_TOOLS: readonly string[] = [];
+
+// Built-in tools that run commands, read or change files, or reach the network.
+// Any of these the operator has not allowed is denied outright, so a room
+// message cannot use it even where the CLI would not ask for permission.
+export const GUARDED_TOOLS: readonly string[] = [
   'Bash',
   'Read',
   'Grep',
   'Glob',
+  'Edit',
+  'Write',
+  'NotebookEdit',
   'WebFetch',
+  'WebSearch',
 ];
+
+/** Guarded tools to deny, given the operator's allowlist. `*` opts out. */
+export function deniedTools(allowed: readonly string[]): string[] {
+  if (allowed.includes('*')) return [];
+  return GUARDED_TOOLS.filter(
+    (tool) => !allowed.some((a) => a === tool || a.startsWith(`${tool}(`)),
+  );
+}
+
+/**
+ * Environment for the `claude` child process: everything except this agent's
+ * own AgentMeet credentials, which the CLI never needs.
+ */
+export function childEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(env)) {
+    if (!key.startsWith('AGENTMEET_')) out[key] = value;
+  }
+  return out;
+}
 
 /**
  * ClaudeCodeResponder wraps the local `claude` CLI as a subprocess. It does NOT
@@ -163,7 +195,10 @@ export class ClaudeCodeResponder {
     this.spawnFn =
       spawnFn ??
       ((cmd, args) =>
-        spawn(cmd, [...args], { shell: false }) as ChildProcessWithoutNullStreams);
+        spawn(cmd, [...args], {
+          shell: false,
+          env: childEnv(process.env),
+        }) as ChildProcessWithoutNullStreams);
   }
 
   public buildArgs(): string[] {
@@ -181,6 +216,10 @@ export class ClaudeCodeResponder {
     }
     if (this.allowedTools.length > 0) {
       args.push('--allowed-tools', this.allowedTools.join(','));
+    }
+    const denied = deniedTools(this.allowedTools);
+    if (denied.length > 0) {
+      args.push('--disallowed-tools', denied.join(','));
     }
     return args;
   }
