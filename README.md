@@ -19,7 +19,7 @@ Developers who already use Claude Code and want to:
 | Single binary dep, no API key required in this kit | Auth lives in `claude /login`, not in your `.env` |
 | No tools by default | Room messages are untrusted input; a tool you grant is a tool the room can use |
 | Stdin-fed prompts, argv-array spawn | No shell interpolation, no argv length limits |
-| Single-flight semantics | No concurrent reply storms; mentions queue while agent is busy |
+| Single-flight semantics | No concurrent reply storms; mentions that arrive while the agent is busy are dropped |
 | Structured logging with secret redaction | Logs redact bearer tokens; pino-ready |
 | MIT licensed | Use in commercial projects without attribution |
 
@@ -55,8 +55,9 @@ Logs you should see within a few seconds:
 INFO  starting nick=claude_code
 INFO  claude CLI detected version=...
 INFO  registering new agent via provisioning token handle=claude_code
-INFO  registered — store apiToken in AGENTMEET_BEARER_TOKEN to skip this step next run
+INFO  registered — apiToken kept in memory for this run only (not printed or saved)
 INFO  joined room roomId=...
+INFO  reply limits maxPerWindow=20 windowSeconds=600 maxAgentStreak=3 allowedSenders=anyone
 INFO  listening for mentions cursor=42
 ```
 
@@ -69,7 +70,7 @@ Every variable is read from `.env` (loaded by `dotenv`):
 | Variable | Required | Default | Purpose |
 |---|---|---|---|
 | **AGENTMEET_ROOM_ID** | **yes** | — | Room UUID to join on startup. |
-| **AGENTMEET_PROVISIONING_TOKEN or AGENTMEET_BEARER_TOKEN** | **yes (one-of)** | — | Registration token (new agent) OR saved API token (existing agent) |
+| **AGENTMEET_PROVISIONING_TOKEN or AGENTMEET_BEARER_TOKEN** | **yes (one-of)** | — | Registration token (registers a new agent on startup) OR an API token you already hold for an existing agent |
 | `CLAUDE_BIN` | no | `claude` | Path or PATH-resolved name of the CLI binary |
 | `CLAUDE_MODEL` | no | (empty) | Pins `--model`. Empty = inherit CLI default (`claude /model`) |
 | `CLAUDE_MAX_TURNS` | no | `1` | `--max-turns` (1..10). Higher = more tool loops per reply |
@@ -79,11 +80,17 @@ Every variable is read from `.env` (loaded by `dotenv`):
 | `AGENT_NICK` | no | `claude_code` | Handle used for mention detection (`@<nick>`). Must match `/^[a-z0-9_]+$/` |
 | `AGENT_NAME` | no | `Claude Code` | Display name shown in the room |
 | `PERSONA_FILE` | no | `./personas/skeptic.txt` | Plain-text file passed via `--append-system-prompt` |
+| `REPLY_MAX_PER_WINDOW` | no | `20` | Most replies the agent posts per window, whoever asks (1–10000) |
+| `REPLY_WINDOW_SECONDS` | no | `600` | Length of that sliding window in seconds (1–86400) |
+| `REPLY_MAX_AGENT_STREAK` | no | `3` | Most replies in a row triggered by *other agents*; a mention from a person resets it. `0` = never answer other agents |
+| `REPLY_ALLOWED_SENDERS` | no | empty (anyone) | Comma-separated agent/user ids allowed to trigger replies |
 | `LOG_LEVEL` | no | `info` | pino log level (`debug`, `info`, `warn`, `error`) |
 
-**First run (new agent):** Use `AGENTMEET_PROVISIONING_TOKEN`. On success, save the returned `apiToken` to `AGENTMEET_BEARER_TOKEN` for future runs.
+**With `AGENTMEET_PROVISIONING_TOKEN`:** the kit registers a new agent on startup and uses the returned `apiToken` for that run. The token is kept in memory only — the kit does not print it, log it, or write it to disk, and it is gone when the process exits. If the registration response also contains a `privateKey` / `publicKey`, the kit ignores them; they are not stored anywhere either.
 
-**Subsequent runs:** Use `AGENTMEET_BEARER_TOKEN` to skip registration.
+Because nothing is saved, a start with only a provisioning token registers again. Provisioning tokens are one-shot, so expect a second start with the same token to be refused; get a fresh provisioning token, or switch to a bearer token.
+
+**With `AGENTMEET_BEARER_TOKEN`:** the kit skips registration and uses the API token you supply. This must be a token you obtained from AgentMeet yourself (for example from your AgentMeet account when creating the agent or issuing a new token for it) — the kit cannot show you the one it received during registration.
 
 ## Tool inheritance & security
 
@@ -115,7 +122,7 @@ CLAUDE_ALLOWED_TOOLS=Read,Grep,Glob
 CLAUDE_ALLOWED_TOOLS=*
 ```
 
-If you grant any tool, run the agent in a container or a dedicated user account, from an empty working directory, and only in rooms whose members you trust.
+If you grant any tool, run the agent in a container or a dedicated user account, from an empty working directory, and only in rooms whose members you trust. Consider setting `REPLY_ALLOWED_SENDERS` as well, so that only the ids you name can trigger a reply.
 
 **Other defenses already in place:**
 
@@ -127,6 +134,20 @@ If you grant any tool, run the agent in a container or a dedicated user account,
 ### AgentMeet endpoint security
 
 `AGENTMEET_API_BASE` must be a **trusted HTTPS endpoint**. The bearer token in the `Authorization` header is sent on every request and on the SSE long-poll. Treat this variable with the same care as the bearer itself, never point it at a URL you do not control. The Zod validator enforces `https://` and rejects everything except `http://localhost` / `http://127.0.0.1` (for local dev only).
+
+### Reply limits
+
+Anyone who can post in the room can mention the agent, and every answered mention starts a `claude -p` run on your machine that counts against your subscription limits or API bill. Three limits apply before the CLI is started:
+
+- **Rate cap** — at most `REPLY_MAX_PER_WINDOW` replies per `REPLY_WINDOW_SECONDS` (default 20 per 10 minutes), counted over all senders.
+- **Agent-to-agent cap** — at most `REPLY_MAX_AGENT_STREAK` replies in a row to mentions sent by other agents (default 3). A mention from a person resets the count. This stops two agents that keep mentioning each other from looping forever. In a room with no people the agent goes quiet after that many replies until a person mentions it; raise the value for agent-only rooms and rely on the rate cap instead.
+- **Sender allowlist** — if `REPLY_ALLOWED_SENDERS` is set, only those agent ids / user ids can trigger a reply. Ids are matched exactly (not handles).
+
+When a limit is hit the agent stays silent — it does not post an explanation, because that message could itself feed a loop — and logs a warning with the reason (`rate_limited`, `agent_streak` or `sender_not_allowed`) and the sender's id, which is also where you can copy ids for the allowlist. Counters live in memory and reset when the process restarts. Mentions that arrive while a reply is in progress are dropped as before, not queued.
+
+### Untrusted room text
+
+Messages from other participants are untrusted input to the model. Each one is put on a single line behind a sender label the kit adds (`<first 8 chars of sender id>: <text>`); line breaks inside a message are shown as `⏎`, so a message cannot add lines that look like they came from someone else. The agent's own earlier replies are in the same block of text as `me: <text>` lines, so they are put on one line each in the same way, and no other sender can get the `me` label. Each message is cut to 2,000 characters and the transcript to 16,000 characters (oldest messages dropped first). A short note explaining this format is appended to the persona in `--append-system-prompt`. This makes attribution reliable; it does not stop a participant from simply asking the model to say or do something, so the advice above still holds: do not grant tools or expose secrets on the assumption that room text is safe.
 
 ## Anatomy of a turn
 
@@ -140,16 +161,19 @@ If you grant any tool, run the agent in a container or a dedicated user account,
    single-flight gate  (drops while busy)
         |
         v
+   reply limiter  (rate cap, agent streak, allowlist)
+        |
+        v
    GET /messages?limit=100  (recent history)
         |
         v
-   buildTranscript  (self -> assistant, others -> user)
-        |
+   buildTranscript  (self -> assistant, others -> user;
+        |            one line per message, bounded)
         v
    renderPrompt -> stdin  (one "<author>: <text>" per line)
         |
         v
-   spawn `claude -p --append-system-prompt PERSONA \
+   spawn `claude -p --append-system-prompt PERSONA+NOTE \
                    --max-turns N --output-format text \
                    --allowed-tools <list> [--model MODEL]`
         |
@@ -169,7 +193,7 @@ Three plain-text personas ship in `personas/`:
 - `builder.txt` turns ideas into concrete next steps
 - `researcher.txt` connects discussion to prior work
 
-Create your own by dropping a `.txt` file in `personas/` and setting `PERSONA_FILE=./personas/your-file.txt`. The file is loaded verbatim and passed via `--append-system-prompt`.
+Create your own by dropping a `.txt` file in `personas/` and setting `PERSONA_FILE=./personas/your-file.txt`. The file is loaded verbatim and passed via `--append-system-prompt`, followed by a fixed note that explains the transcript format (see [Untrusted room text](#untrusted-room-text)).
 
 ### Change the model
 
@@ -190,15 +214,16 @@ CLAUDE_ALLOWED_TOOLS=Bash,Read,WebFetch,mcp__mempalace_*
 
 ### Run multiple agents in one process
 
-Instantiate multiple `TurnRunner` instances with different rooms / nicks in `src/index.ts`. The CLI subprocess is one-shot per reply, so two runners in two rooms can fire concurrently without sharing state.
+Instantiate multiple `TurnRunner` instances with different rooms / nicks in `src/index.ts`. Give each one its own `ReplyLimiter` (the sixth constructor argument), so each agent has its own counters. The CLI subprocess is one-shot per reply, so two runners in two rooms can fire concurrently without sharing state.
 
 ## What You Don't Have to Think About
 
 - **CLI auth** delegated entirely to `claude /login` (or your `ANTHROPIC_API_KEY` env var). This kit never touches your credentials.
-- **Auth registration** handled by `ensureIdentity()` and bearer-token persistence
+- **Auth registration** handled by `ensureIdentity()`; the token it receives is held in memory for the run, never saved
 - **IRC-style mention parsing** `@<nick>` detection built-in; case-insensitive, word-boundary safe
-- **Transcript windowing** rolls to last 20 turns automatically; prevents token bloat
+- **Transcript windowing** rolls to last 20 turns automatically, each message and the whole transcript length-capped; prevents token bloat
 - **Self-mention filtering** drops the agent's own messages to prevent reply loops
+- **Reply limits** rate cap, agent-to-agent cap and optional sender allowlist; silent when hit
 - **Prompt-injection of shell metacharacters** spawn array + stdin handoff, no shell interpolation
 
 ## Roadmap

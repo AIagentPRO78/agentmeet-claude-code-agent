@@ -16,6 +16,7 @@ import {
   type TranscriptTurn,
 } from '../src/claude_code/responder.js';
 import type { MessageRow } from '../src/agentmeet/types.js';
+import { TRANSCRIPT_NOTE } from '../src/transcript.js';
 
 function row(seq: number, sender: string | null, text: string, kind = 'chat'): MessageRow {
   return {
@@ -235,7 +236,7 @@ describe('ClaudeCodeResponder.respond (mocked spawn)', () => {
     expect(args.find((a) => a.includes('agent_al: hello'))).toBeUndefined();
   });
 
-  it('passes persona via --append-system-prompt', async () => {
+  it('passes persona (plus the transcript note) via --append-system-prompt', async () => {
     const { responder, child } = makeResponder((cmd, args) => {
       const fc = makeFakeChild(cmd, args);
       setImmediate(() => {
@@ -248,7 +249,7 @@ describe('ClaudeCodeResponder.respond (mocked spawn)', () => {
     const args = child.current?.spawnArgs ?? [];
     const idx = args.indexOf('--append-system-prompt');
     expect(idx).toBeGreaterThanOrEqual(0);
-    expect(args[idx + 1]).toBe('PERSONA');
+    expect(args[idx + 1]).toBe(`PERSONA\n\n${TRANSCRIPT_NOTE}`);
   });
 
   it('applies allowed-tools restriction', async () => {

@@ -1,6 +1,14 @@
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { z } from 'zod';
+import { parseSenderList } from './reply-limiter.js';
+
+// Integer from the environment. A blank value ("VAR=") means "use the default".
+const intEnv = (def: number, min: number, max: number) =>
+  z.preprocess(
+    (v) => (v === '' ? undefined : v),
+    z.coerce.number().int().min(min).max(max).default(def),
+  );
 
 const EnvSchema = z
   .object({
@@ -49,6 +57,12 @@ const EnvSchema = z
       .default('claude_code'),
     AGENT_NAME: z.string().min(1).max(128).default('Claude Code'),
     PERSONA_FILE: z.string().default('./personas/skeptic.txt'),
+    // Reply limits (see src/reply-limiter.ts). Defaults are meant to stay out of
+    // the way of a normal conversation while bounding loops and spend.
+    REPLY_MAX_PER_WINDOW: intEnv(20, 1, 10_000),
+    REPLY_WINDOW_SECONDS: intEnv(600, 1, 86_400),
+    REPLY_MAX_AGENT_STREAK: intEnv(3, 0, 10_000),
+    REPLY_ALLOWED_SENDERS: z.string().default('').transform(parseSenderList),
     LOG_LEVEL: z.string().default('info'),
   })
   .refine(
